@@ -1,0 +1,178 @@
+name: RDP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  setup-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          Write-Host "Installing Tailscale..." -ForegroundColor Green
+          choco install tailscale -y --no-progress
+
+      - name: Generate Credentials
+        id: creds
+        shell: powershell
+        run: |
+          $username = "hamzaedits"
+          $password = "hamzaedits@2027"
+          
+          echo "user=$username" >> $env:GITHUB_OUTPUT
+          echo "pass=$password" >> $env:GITHUB_OUTPUT
+          Write-Host "Generated user: $username" -ForegroundColor Green
+          Write-Host "Generated password: $password" -ForegroundColor Green
+
+      - name: Create Local User
+        shell: powershell
+        run: |
+          $username = "${{ steps.creds.outputs.user }}"
+          $password = "${{ steps.creds.outputs.pass }}"
+          $secPass = ConvertTo-SecureString -String $password -AsPlainText -Force
+          
+          try {
+            $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+            
+            if ($userExists) {
+              Write-Host "User already exists, updating password..." -ForegroundColor Yellow
+              $userExists | Set-LocalUser -Password $secPass -ErrorAction Stop
+            } else {
+              Write-Host "Creating new user..." -ForegroundColor Green
+              New-LocalUser -Name $username -Password $secPass -FullName "RDP User" -Description "Automated" -ErrorAction Stop
+            }
+            
+            $isMember = Get-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+            
+            if (-not $isMember) {
+              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
+              Write-Host "User added to Administrators" -ForegroundColor Green
+            }
+            
+            Write-Host "User ready" -ForegroundColor Green
+          } catch {
+            Write-Host "Error: $_" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Enable RDP
+        shell: powershell
+        run: |
+          Write-Host "Enabling RDP..." -ForegroundColor Green
+          
+          try {
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 2 -Force
+            Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+            Set-Service -Name "TermService" -StartupType "Automatic"
+            Write-Host "RDP Enabled successfully" -ForegroundColor Green
+          } catch {
+            Write-Host "Error: $_" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Configure Windows Firewall
+        shell: powershell
+        run: |
+          Write-Host "Configuring Firewall..." -ForegroundColor Green
+          
+          try {
+            Remove-NetFirewallRule -Name "RDP-In" -ErrorAction SilentlyContinue
+            New-NetFirewallRule -Name "RDP-In" -DisplayName "Remote Desktop" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Enabled True
+            Write-Host "Firewall configured successfully" -ForegroundColor Green
+          } catch {
+            Write-Host "Error: $_" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Setup Tailscale
+        shell: powershell
+        id: tailscale
+        run: |
+          Write-Host "Setting up Tailscale..." -ForegroundColor Green
+          
+          $tailscalePath = "C:\Program Files\Tailscale\tailscale.exe"
+          
+          if (Test-Path $tailscalePath) {
+            try {
+              & $tailscalePath up --accept-routes
+              Start-Sleep -Seconds 5
+              $tailscaleIP = & $tailscalePath ip -4
+              Write-Host "Tailscale started - IP: $tailscaleIP" -ForegroundColor Green
+              echo "ip=$tailscaleIP" >> $env:GITHUB_OUTPUT
+            } catch {
+              Write-Host "Error: $_" -ForegroundColor Red
+              exit 1
+            }
+          } else {
+            Write-Host "Tailscale not found" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Display Connection Info
+        shell: powershell
+        run: |
+          $username = "${{ steps.creds.outputs.user }}"
+          $password = "${{ steps.creds.outputs.pass }}"
+          $ip = "${{ steps.tailscale.outputs.ip }}"
+          
+          Write-Host ""
+          Write-Host "==========================================" -ForegroundColor Cyan
+          Write-Host "   RDP CONNECTION INFO - 6 HOURS ACTIVE" -ForegroundColor Cyan
+          Write-Host "==========================================" -ForegroundColor Cyan
+          Write-Host "IP Address : $ip" -ForegroundColor Yellow
+          Write-Host "Username   : $username" -ForegroundColor Yellow
+          Write-Host "Password   : $password" -ForegroundColor Yellow
+          Write-Host "Port       : 3389" -ForegroundColor Yellow
+          Write-Host "Duration   : 6 Hours" -ForegroundColor Yellow
+          Write-Host "==========================================" -ForegroundColor Cyan
+          Write-Host ""
+
+      - name: Save Connection Details
+        shell: powershell
+        run: |
+          $details = @{
+            ip = "${{ steps.tailscale.outputs.ip }}"
+            username = "${{ steps.creds.outputs.user }}"
+            password = "${{ steps.creds.outputs.pass }}"
+            port = 3389
+            duration = "6 Hours"
+            created = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          }
+          
+          $details | ConvertTo-Json | Out-File -FilePath "connection-details.json" -Encoding UTF8
+          Write-Host "Connection details saved" -ForegroundColor Green
+
+      - name: Upload Connection Details
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-connection-details
+          path: connection-details.json
+          retention-days: 7
+
+      - name: Keep Alive for 6 Hours
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "RDP Server is running... waiting 6 hours" -ForegroundColor Green
+          Write-Host ""
+          
+          $startTime = Get-Date
+          $endTime = $startTime.AddSeconds(21600)
+          
+          while ((Get-Date) -lt $endTime) {
+            $remaining = ($endTime - (Get-Date)).TotalHours
+            Write-Host "Time remaining: $([Math]::Round($remaining, 2)) hours" -ForegroundColor Green
+            Start-Sleep -Seconds 600
+          }
+          
+          Write-Host ""
+          Write-Host "6 hours completed - RDP session ended" -ForegroundColor Yellow
+          Write-Host ""
