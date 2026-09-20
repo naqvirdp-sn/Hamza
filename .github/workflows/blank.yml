@@ -23,7 +23,7 @@ jobs:
         id: creds
         shell: powershell
         run: |
-          $username = "hamzaedits"
+          $username = "hamzaadmin51"
           $password = "hamzaedits@2027"
           
           echo "user=$username" >> $env:GITHUB_OUTPUT
